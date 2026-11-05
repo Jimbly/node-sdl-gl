@@ -99,6 +99,44 @@ void EnableDebugCallback(const void *userParam) {
   glDebugMessageCallbackKHR(DebugMessageCallback, userParam);
 }
 
+#if defined(_WIN32)
+#include <dxgi.h>
+#pragma comment(lib, "dxgi.lib")
+
+// ANGLE's D3D11 backend Present()s through a DXGI swap chain, which handles
+// Alt+Enter itself which breaks when SDL does not know about the change and
+// wants to handle fullscreen instead.
+static void DisableDxgiAltEnter(EGLDisplay display, HWND hwnd) {
+  if (!eglQueryDisplayAttribEXT || !eglQueryDeviceAttribEXT) { return; }
+
+  EGLAttrib eglDevice = 0;
+  if (!eglQueryDisplayAttribEXT(display, EGL_DEVICE_EXT, &eglDevice) || !eglDevice) { return; }
+
+  EGLAttrib d3dDevice = 0;
+  if (!eglQueryDeviceAttribEXT((EGLDeviceEXT)eglDevice, EGL_D3D11_DEVICE_ANGLE, &d3dDevice) ||
+      !d3dDevice) {
+    return; // not the D3D11 backend
+  }
+
+  // ID3D11Device -> IDXGIDevice -> IDXGIAdapter -> IDXGIFactory (the one ANGLE
+  // creates its swap chains with)
+  IUnknown *device = reinterpret_cast<IUnknown *>(d3dDevice);
+  IDXGIDevice *dxgiDevice = nullptr;
+  if (FAILED(device->QueryInterface(__uuidof(IDXGIDevice), (void **)&dxgiDevice))) { return; }
+
+  IDXGIAdapter *adapter = nullptr;
+  if (SUCCEEDED(dxgiDevice->GetAdapter(&adapter))) {
+    IDXGIFactory *factory = nullptr;
+    if (SUCCEEDED(adapter->GetParent(__uuidof(IDXGIFactory), (void **)&factory))) {
+      factory->MakeWindowAssociation(hwnd, DXGI_MWA_NO_ALT_ENTER);
+      factory->Release();
+    }
+    adapter->Release();
+  }
+  dxgiDevice->Release();
+}
+#endif
+
 // Massage format parameter for compatibility with ANGLE's desktop GL
 // restrictions.
 GLenum SizeFloatingPointFormat(GLenum format) {
@@ -450,6 +488,9 @@ WebGLRenderingContext::WebGLRenderingContext(int width, int height, bool alpha, 
 
   if (hasWindow) {
     surface = eglCreateWindowSurface(display, config, window, nullptr);
+#if defined(_WIN32)
+    if (surface != EGL_NO_SURFACE) { DisableDxgiAltEnter(display, (HWND)window); }
+#endif
     if (surface != EGL_NO_SURFACE && preserveWindowBuffer) {
       eglSurfaceAttrib(display, surface, EGL_SWAP_BEHAVIOR, EGL_BUFFER_PRESERVED);
     }
